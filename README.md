@@ -10,7 +10,6 @@ This repository contains the code and related materials for the experiments cond
 - [Requirements](#requirements)
 - [Usage](#usage)
 - [License](#license)
-- [Contributing](#contributing)
 - [Acknowledgments](#acknowledgments)
 
 ## Introduction
