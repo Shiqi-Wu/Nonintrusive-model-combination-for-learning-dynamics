@@ -1,5 +1,8 @@
 import numpy as np
 from scipy.optimize import minimize
+from scipy.integrate import solve_ivp
+import tensorflow as tf
+import gc
 
 class Toymodel(object):
     def __init__(self, dim = 20, L0 = 0, L1 = 1, mu = 1):
@@ -7,6 +10,7 @@ class Toymodel(object):
         self.L0 = L0
         self.L1 = L1
         self.mu = mu
+        self.build_A()
     
     def reaction_term(self, u):
         return 1/4*2 * (u-1)*(u+1)**2+ 1/4 * 2 * (u-1)**2 * (u+1)
@@ -18,6 +22,11 @@ class Toymodel(object):
         for i in range(self.dim - 2):
             self.A[i, i + 1] = 1
             self.A[i + 1, i] = 1
+
+    def ivp_function(self, t, u):
+        dlt_x = (self.L1 - self.L0)/self.dim
+        du = self.A @ u / dlt_x ** 2 + np.array([self.reaction_term(ui) for ui in u])
+        return du
     
     def generate_traj(self, steps, u0, dlt_t = 0.001):
         u_data = np.zeros([steps + 1, self.dim - 1])
@@ -25,26 +34,50 @@ class Toymodel(object):
         dlt_x = (self.L1 - self.L0)/self.dim
         for step in range(steps):
             u_0 = u_data[step, :]
-            u_1 = u_0 + dlt_t * (self.mu * u_0 @ self.A/ dlt_x ** 2) + self.reaction_term(u_0)
+            u_1 = u_0 + dlt_t * (self.mu * u_0 @ self.A/ dlt_x ** 2 + self.reaction_term(u_0))
             u_data[step + 1,:] = u_1
         return u_data
     
-    def genarate_training_data(self, steps, traj_num, dlt_t = 0.001):
-        u0 = np.random.rand(self.dim - 1)
-        u_data = self.generate_traj(steps, u0, dlt_t)
+    def generate_traj_solve_ivp(self, steps, u0, dlt_t = 0.001):
+        t_span = [0, steps * dlt_t]
+        u_data = np.zeros([steps + 1, self.dim - 1])
+        u_data[0, :] = u0
+        dlt_x = (self.L1 - self.L0)/self.dim
+
+        def ivp_function(t, u):
+            return self.mu * u @ self.A / dlt_x ** 2 + self.reaction_term(u)
+
+        sol = solve_ivp(ivp_function, t_span, u0, t_eval=np.linspace(t_span[0], t_span[1], steps + 1))
+        u_data = sol.y.T
+        print(np.shape(u_data))
+        return u_data
+    
+    def genarate_training_data(self, steps, traj_num, dlt_t = 0.001, type = 'Euler-forward'):
+        u0 = 2 * np.random.rand(self.dim - 1) - 1
+
+        if type == 'Euler-forward':
+            u_data = self.generate_traj(steps, u0, dlt_t)
+        elif type == 'Solve_ivp':
+            u_data = self.generate_traj_solve_ivp(steps, u0, dlt_t)
+
         u_x = u_data[:-1,:]
         u_y = u_data[1:,:]
         for i in range(traj_num - 1):
             u0 = np.random.rand(self.dim - 1)
-            u = self.generate_traj(steps, u0, dlt_t)
+            if type == 'Euler-forward':
+                u = self.generate_traj(steps, u0, dlt_t)
+            elif type == 'Solve_ivp':
+                u = self.generate_traj_solve_ivp(steps, u0, dlt_t)
             u_data = np.concatenate((u_data, u), axis = 0)
             u_x = np.concatenate((u_x, u[:-1,:]), axis = 0)
             u_y = np.concatenate((u_y, u[1:,:]), axis = 0)
         u_x_lace = u_x @ self.A
+        u_y_lace = u_y @ self.A
         data_x = np.reshape(u_x, (-1, 1))
         data_y = np.reshape(u_y, (-1, 1))
-        data_lace = np.reshape(u_x_lace, (-1,1))
-        return data_x, data_y, data_lace
+        data_lace_x = np.reshape(u_x_lace, (-1,1))
+        data_lace_y = np.reshape(u_y_lace, (-1,1))
+        return data_x, data_y, data_lace_x, data_lace_y
     
 class DicPoly(object):
     def __init__(self, degree = 2):
@@ -114,6 +147,158 @@ def Original_Hybrid_Method(x_data, y_data, x_lace, dic, mu_error_bound):
         epoch = epoch + 1
     
     return mu_pred, K, mu_history, err_history, koopman_history
+
+def Original_Hybrid_Method_residual(x_data, y_data, x_lace, dic, mu_error_bound, dlt_t):
+    """
+    x_data, y_data: dataset
+    """
+    dic_x = dic.call(x_data)
+    mu_current, mu_pred = 0, 1e-3
+    mu_history = []
+    err_history = []
+    koopman_history = []
+    y_linear = y_data
+    inverse_matrix = np.linalg.inv(dic_x.T @ dic_x)
+    epoch = 0
+
+    while np.linalg.norm(mu_current - mu_pred) > mu_error_bound:
+        mu_current = mu_pred
+        mu_pred, y_linear_pred = Hybrid_compute_linear_weight(x_lace,y_linear)
+        y_koopman = y_data - x_data - y_linear_pred
+        y_koopman_rescale = y_koopman / dlt_t
+        dic_y_koopman = dic.call(y_koopman_rescale)
+        K = inverse_matrix @ dic_x.T @ dic_y_koopman
+        dic_y_koopman_pred = dic_x @ K
+        y_koopman_pred_rescale = np.reshape(dic_y_koopman_pred[:,1],(-1,1))
+        y_koopman_pred = y_koopman_pred_rescale * dlt_t
+        y_linear = y_data - x_data - y_koopman_pred
+        mu_history.append(mu_pred)
+        err_history.append(np.linalg.norm(y_linear - y_linear_pred, ord=np.inf))
+        koopman_history.append(y_koopman_pred_rescale)
+        print('epoch = %d, the error is %f' %(epoch, err_history[-1]))
+        epoch = epoch + 1
+    
+    return mu_pred, K, mu_history, err_history, koopman_history
+
+# Redefine the DicPoly class for TensorFlow
+class DicPolyTF(object):
+    def __init__(self, degree=2):
+        self.dictionary_degree = degree
+    
+    def call(self, data):
+        poly = []
+        poly_index = []
+        pre_poly = []
+        N = data.shape[1]
+        for j in range(N):
+            pre_poly.append([j])
+        for i in range(1, self.dictionary_degree):
+            cur_poly = []
+            for pp in pre_poly:
+                index = pp[-1]
+                for j in range(index, N):
+                    cur_term = pp[:]
+                    cur_term.append(j)
+                    cur_poly.append(cur_term)
+                    poly_index.append(cur_term)
+            pre_poly = cur_poly
+        for index in poly_index:
+            cur_poly_data = tf.ones(data.shape[0])
+            for i in index:
+                cur_poly_data = cur_poly_data * data[:, i]
+            poly.append(cur_poly_data)
+        poly = tf.stack(poly, axis=1)
+        ones = tf.ones((data.shape[0], 1))
+        return tf.concat([ones, data, poly], axis=1)
+
+# Define the function for gradient descent optimization using TensorFlow
+def optimize_with_gradient_descent_tf(x_data, y_data, lace_data, degree, learning_rate, iterations):
+    dic_poly_tf = DicPolyTF(degree)
+
+    # Convert NumPy arrays to TensorFlow tensors
+    x_tf = tf.convert_to_tensor(dic_poly_tf.call(x_data), dtype=tf.float32)
+    y_tf = tf.convert_to_tensor(y_data, dtype=tf.float32)
+    lace_tf = tf.convert_to_tensor(lace_data, dtype=tf.float32)
+
+    # Initialize parameters
+    mu = tf.Variable(0.1, dtype=tf.float32)
+    lam = tf.Variable(tf.random.uniform([x_tf.shape[1]], dtype=tf.float32))
+
+    # Initialize error history list
+    err_history = []
+
+    # Perform gradient descent
+    for i in range(iterations):
+        with tf.GradientTape() as tape:
+            # Compute predicted values
+            y_pred = mu * lace_tf + tf.linalg.matvec(x_tf, lam)
+            
+            # Calculate the loss
+            loss = tf.reduce_mean(tf.square(y_pred - y_tf))
+
+        # Compute gradients
+        gradients = tape.gradient(loss, [mu, lam])
+
+        # Update parameters
+        mu.assign_sub(learning_rate * gradients[0])
+        lam.assign_sub(learning_rate * gradients[1])
+
+        # Append error (infinite norm) to the history
+        err = tf.norm(y_pred - y_tf, ord=np.inf).numpy()
+        err_history.append(err)
+
+        print(f"Iteration {i+1}, Loss: {loss.numpy()}")
+
+    # Return the final parameters
+    return mu.numpy(), lam.numpy(), err_history
+
+def optimize_with_gradient_descent_tf_small_batch(x_data, y_data, lace_data, degree, learning_rate, iterations, batch_size):
+    dic_poly_tf = DicPolyTF(degree)
+    x_tf_full = tf.convert_to_tensor(dic_poly_tf.call(x_data), dtype=tf.float32)
+    y_tf_full = tf.convert_to_tensor(y_data, dtype=tf.float32)
+    lace_tf_full = tf.convert_to_tensor(lace_data, dtype=tf.float32)
+
+    dataset = tf.data.Dataset.from_tensor_slices((x_tf_full, y_tf_full, lace_tf_full))
+    dataset = dataset.batch(batch_size)
+
+    # Initialize parameters
+    mu = tf.Variable(0.1, dtype=tf.float32)
+    lam = tf.random.uniform([x_tf_full.shape[1]], dtype=tf.float32)
+    lam = tf.Variable(tf.reshape(lam, [-1, 1]))
+
+    # Initialize error history list
+    err_history = []
+
+    # Perform gradient descent
+    for i in range(iterations):
+        for x_batch, y_batch, lace_batch in dataset:
+            with tf.GradientTape() as tape:
+                # print(tf.shape(lam))
+                y_pred = mu * lace_batch + tf.matmul(x_batch, lam)
+                # print(tf.shape(mu * lace_batch))
+                # print(tf.shape(tf.matmul(x_batch, lam)))
+                # print(tf.shape(y_pred))
+                # print(tf.shape(y_batch))
+                loss = tf.reduce_mean(tf.square(y_pred - y_batch))
+            
+            # break
+            gradients = tape.gradient(loss, [mu, lam])
+            mu.assign_sub(learning_rate * gradients[0])
+            lam.assign_sub(learning_rate * gradients[1])
+            tf.keras.backend.clear_session()
+            gc.collect()
+
+        # break
+        # Compute error for the entire dataset (for monitoring)
+        y_pred_full = mu * lace_tf_full + tf.matmul(x_tf_full, lam)
+        err = tf.norm(y_pred_full - y_tf_full, ord=np.inf).numpy()
+        err_history.append(err)
+
+        print(f"Iteration {i+1}, Loss: {loss.numpy()}")
+
+    # Return the final parameters
+    return mu.numpy(), lam.numpy(), err_history
+
 
 def Relaxed_Hybrid_Method(x_data, y_data, x_lace, dic, mu_error_bound):
     """
@@ -321,14 +506,43 @@ class MethodCriterion(object):
             return numerator / denominator
 
         initial_guess = 0.0
-        result = minimize(objective_function, initial_guess, method='BFGS')  # 使用 BFGS 方法
+        result = minimize(objective_function, initial_guess, method='L-BFGS-B')
 
         optimal_k = result.x[0]
         print(result)
 
         return optimal_k
                 
-            
+class LinearModelCombiningNN(object):
+    def __init__(self):
+        self.mu = tf.Variable(0.1, dtype=tf.float32)
+        self.NN = tf.keras.Sequential([
+            tf.keras.layers.Dense(64, activation='relu'),
+            tf.keras.layers.Dense(64, activation='relu'),
+            tf.keras.layers.Dense(1)
+        ])
+
+    def train_NN(self, x_train, y_train, x_test, y_test, epochs=100, learning_rate=0.001):
+        loss_fn = tf.keras.losses.MeanSquaredError()
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+
+        self.NN.compile(optimizer=optimizer, loss=loss_fn)
+        self.NN.fit(x_train, y_train, epochs=epochs, validation_data = [x_test, y_test])
+
+    def linear_regression(self, x, y):
+        x_mean = tf.reduce_mean(x)
+        y_mean = tf.reduce_mean(y)
+
+        numerator = tf.reduce_sum((x - x_mean) * (y - y_mean))
+        denominator = tf.reduce_sum(tf.square(x - x_mean))
+        self.mu.assign(numerator / denominator)
+
+    def iterative_train(self, x_data, y_data, x_lace_data, y_lace_data, type = 'Euler-forward'):
+        
+        
+
+
+
             
 
     
