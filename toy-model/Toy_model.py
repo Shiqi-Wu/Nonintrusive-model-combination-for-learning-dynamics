@@ -3,6 +3,8 @@ from scipy.optimize import minimize
 from scipy.integrate import solve_ivp
 import tensorflow as tf
 import gc
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 
 class Toymodel(object):
     def __init__(self, dim = 20, L0 = 0, L1 = 1, mu = 1):
@@ -515,29 +517,224 @@ class MethodCriterion(object):
                 
 class LinearModelCombiningNN(object):
     def __init__(self):
-        self.mu = tf.Variable(0.1, dtype=tf.float32)
+        self.mu = 0.1
         self.NN = tf.keras.Sequential([
             tf.keras.layers.Dense(64, activation='relu'),
             tf.keras.layers.Dense(64, activation='relu'),
             tf.keras.layers.Dense(1)
         ])
+        self.scaler = MinMaxScaler() 
 
-    def train_NN(self, x_train, y_train, x_test, y_test, epochs=100, learning_rate=0.001):
+    def train_NN(self, x_data, y_data, epochs=100, learning_rate=0.0001):
         loss_fn = tf.keras.losses.MeanSquaredError()
         optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        y_data_scaled = self.scaler.fit_transform(y_data)
+        x_train, x_test, y_train, y_test = train_test_split(x_data, y_data_scaled, test_size=0.2, random_state=42)
 
         self.NN.compile(optimizer=optimizer, loss=loss_fn)
-        self.NN.fit(x_train, y_train, epochs=epochs, validation_data = [x_test, y_test])
+        self.NN.fit(x_train, y_train, epochs=epochs, validation_data = [x_test, y_test], verbose = 2)
+
+    def train_NN_central_difference(self, x1_data, x2_data, y_data, epochs=100, learning_rate=0.0001):
+        loss_fn = tf.keras.losses.MeanSquaredError()
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        y_data_scaled = self.scaler.fit_transform(y_data)
+        x1_train, x1_test, x2_train, x2_test, y_train, y_test = train_test_split(x1_data, x2_data, y_data_scaled, test_size=0.2, random_state=42)
+
+        for epoch in range(epochs):
+            with tf.GradientTape() as tape:
+                # Forward pass: Compute predictions by running inputs through the model
+                y_pred_train = (self.NN(x1_train) + self.NN(x2_train)) / 2
+                # Compute training loss
+                loss_train = loss_fn(y_train, y_pred_train)
+
+            # Compute gradients
+            gradients = tape.gradient(loss_train, self.NN.trainable_variables)
+            # Update weights
+            optimizer.apply_gradients(zip(gradients, self.NN.trainable_variables))
+
+            # Optional: Compute validation loss for monitoring
+            y_pred_test = (self.NN(x1_test) + self.NN(x2_test)) / 2
+            loss_test = loss_fn(y_test, y_pred_test)
+
+            # Print epoch, training and validation loss
+            print(f"Epoch {epoch + 1}, Training Loss: {loss_train.numpy()}, Validation Loss: {loss_test.numpy()}")
+
+    def NN_predict(self, x):
+        NN_predict_scaled = self.NN(x).numpy()
+        NN_predict = self.scaler.inverse_transform(NN_predict_scaled)
+        return NN_predict
+    
+    def NN_predict_central_difference(self, x1, x2):
+        NN_predict_scaled = (self.NN(x1) + self.NN(x2)) / 2
+        NN_predict = self.scaler.inverse_transform(NN_predict_scaled)
+        return NN_predict
 
     def linear_regression(self, x, y):
-        x_mean = tf.reduce_mean(x)
-        y_mean = tf.reduce_mean(y)
+        x = np.array(x)
+        y = np.array(y)
 
-        numerator = tf.reduce_sum((x - x_mean) * (y - y_mean))
-        denominator = tf.reduce_sum(tf.square(x - x_mean))
-        self.mu.assign(numerator / denominator)
+        # Calculate the mean of x and y
+        x_mean = np.mean(x)
+        y_mean = np.mean(y)
 
-    def iterative_train(self, x_data, y_data, x_lace_data, y_lace_data, type = 'Euler-forward'):
+        # Calculate the numerator and denominator for the linear regression formula
+        numerator = np.sum((x - x_mean) * (y - y_mean))
+        denominator = np.sum((x - x_mean) ** 2)
+
+        # Update self.mu
+        self.mu = numerator / denominator
+
+    def iterative_train(self, x_data, y_data, 
+                        x_lace_data, y_lace_data, 
+                        iterative_steps = 50, epochs = 100, type = 'Euler-forward', 
+                        acc = False):
+        dx_data = y_data - x_data
+        mu_pre = 1e3
+        err_history = []
+
+        if acc == True:
+            if type == 'Euler-forward':
+                self.linear_regression(x_lace_data, dx_data)
+                mu_pre = self.mu
+                dx_data_NN = dx_data - self.mu * x_lace_data
+                self.train_NN(x_data, dx_data_NN, epochs)
+                dx_data_NN_predict = self.NN_predict(x_data)
+                dx_data_linear = dx_data - dx_data_NN_predict
+                self.linear_regression(x_lace_data, dx_data_linear)
+                dx_data_predict_previous = self.mu * x_lace_data + dx_data_NN_predict
+
+                err = tf.norm(dx_data_linear - self.mu * x_lace_data, ord=np.inf).numpy()
+                err_history.append(err)
+
+                for step in range(iterative_steps):
+                    mu_pre = self.mu
+                    print(self.mu)
+                    dx_data_NN = dx_data - self.mu * x_lace_data
+                    self.train_NN(x_data, dx_data_NN, epochs)
+                    dx_data_NN_predict = self.NN_predict(x_data)
+                    dx_data_linear = dx_data - dx_data_NN_predict
+                    self.linear_regression(x_lace_data, dx_data_linear)
+                    dx_data_predict_current = self.mu * x_lace_data + dx_data_NN_predict
+
+                    numerator = tf.reduce_sum((dx_data - dx_data_predict_previous) * (dx_data_predict_previous - dx_data_predict_current))
+                    denominator = tf.reduce_sum(tf.square(dx_data_predict_previous - dx_data_predict_current))
+                    t_F = numerator / denominator
+
+                    self.mu = t_F * self.mu + (1 - t_F) * mu_pre
+
+                    dx_data_predict_previous = dx_data_predict_current
+
+                    err = tf.norm(dx_data_linear - self.mu * x_lace_data, ord=np.inf).numpy()
+                    err_history.append(err)
+                
+            elif type == 'Euler-backward':
+                self.linear_regression(y_lace_data, dx_data)
+                mu_pre = self.mu
+
+                dx_data_NN = dx_data - self.mu * x_lace_data
+                self.train_NN(y_data, dx_data_NN, epochs)
+                dx_data_NN_predict = self.NN_predict(y_data)
+                dx_data_linear = dx_data - dx_data_NN_predict
+                self.linear_regression(y_lace_data, dx_data_linear)
+                dx_data_predict_previous = self.mu * y_lace_data + dx_data_NN_predict
+
+                err = tf.norm(dx_data_linear - self.mu * y_lace_data, ord=np.inf).numpy()
+                err_history.append(err)
+
+                for step in range(iterative_steps):
+                    mu_pre = self.mu
+                    dx_data_NN = dx_data - self.mu * y_lace_data
+                    self.train_NN(y_data, dx_data_NN, epochs)
+                    dx_data_NN_predict = self.NN_predict(y_data)
+                    dx_data_linear = dx_data - dx_data_NN_predict
+                    self.linear_regression(y_lace_data, dx_data_linear)
+                    dx_data_predict_current = self.mu * y_lace_data + dx_data_NN_predict
+
+                    numerator = tf.reduce_sum((dx_data - dx_data_predict_previous) * (dx_data_predict_previous - dx_data_predict_current))
+                    denominator = tf.reduce_sum(tf.square(dx_data_predict_previous - dx_data_predict_current))
+                    t_F = numerator / denominator
+
+                    self.mu = t_F * self.mu + (1 - t_F) * mu_pre
+
+                    dx_data_predict_previous = dx_data_predict_current
+
+                    err = tf.norm(dx_data_linear - self.mu * y_lace_data, ord=np.inf).numpy()
+                    err_history.append(err)
+
+            elif type == 'Central-difference':
+                self.linear_regression((x_lace_data + y_lace_data)/2, dx_data)
+                mu_pre = self.mu
+
+                dx_data_NN = dx_data - self.mu * (x_lace_data + y_lace_data)/2
+                self.train_NN_central_difference(x_data, y_data, dx_data_NN, epochs)
+                dx_data_NN_predict = self.NN_predict_central_difference(x_data, y_data)
+                dx_data_linear = dx_data - dx_data_NN_predict
+                self.linear_regression((x_lace_data + y_lace_data)/2, dx_data_linear)
+                dx_data_predict_previous = self.mu * (x_lace_data + y_lace_data)/2 + dx_data_NN_predict
+
+                err = tf.norm(dx_data_linear - self.mu * y_lace_data, ord=np.inf).numpy()
+                err_history.append(err)
+
+                for step in range(iterative_steps):
+                    mu_pre = self.mu
+                    dx_data_NN = dx_data - self.mu * (x_lace_data + y_lace_data)/2
+                    self.train_NN_central_difference(x_data, y_data, dx_data_NN, epochs)
+                    dx_data_NN_predict = self.NN_predict_central_difference(x_data, y_data)
+                    dx_data_linear = dx_data - dx_data_NN_predict
+                    self.linear_regression((x_lace_data + y_lace_data)/2, dx_data_linear)
+                    dx_data_predict_current = self.mu * (x_lace_data + y_lace_data)/2 + dx_data_NN_predict
+
+                    numerator = tf.reduce_sum((dx_data - dx_data_predict_previous) * (dx_data_predict_previous - dx_data_predict_current))
+                    denominator = tf.reduce_sum(tf.square(dx_data_predict_previous - dx_data_predict_current))
+                    t_F = numerator / denominator
+
+                    self.mu = t_F * self.mu + (1 - t_F) * mu_pre
+
+                    dx_data_predict_previous = dx_data_predict_current
+
+                    err = tf.norm(dx_data_linear - self.mu * (x_lace_data + y_lace_data)/2, ord=np.inf).numpy()
+                    err_history.append(err)
+
+
+        elif acc == False:
+            if type == 'Euler-forward':
+                self.linear_regression(x_lace_data, dx_data)
+                for step in range(iterative_steps):
+                    mu_pre = self.mu
+                    print(self.mu)
+                    dx_data_NN = dx_data - self.mu * x_lace_data
+                    self.train_NN(x_data, dx_data_NN, epochs)
+                    dx_data_NN_predict = self.NN_predict(x_data)
+                    dx_data_linear = dx_data - dx_data_NN_predict
+                    self.linear_regression(x_lace_data, dx_data_linear)
+                    err = tf.norm(dx_data_linear - self.mu * x_lace_data, ord=np.inf).numpy()
+                    err_history.append(err)
+
+            elif type == 'Euler-backward':
+                self.linear_regression(y_lace_data, dx_data)
+                for step in range(iterative_steps):
+                    mu_pre = self.mu
+                    dx_data_NN = dx_data - self.mu * y_lace_data
+                    self.train_NN(y_data, dx_data_NN, epochs)
+                    dx_data_NN_predict = self.NN_predict(y_data)
+                    dx_data_linear = dx_data - dx_data_NN_predict
+                    self.linear_regression(y_lace_data, dx_data_linear)
+                    err = tf.norm(dx_data_linear - self.mu * y_lace_data, ord=np.inf).numpy()
+                    err_history.append(err)
+        
+            elif type == 'Central-difference':
+                self.linear_regression((x_lace_data + y_lace_data)/2, dx_data)
+                for step in range(iterative_steps):
+                    mu_pre = self.mu
+                    dx_data_NN = dx_data - self.mu * (x_lace_data + y_lace_data)/2
+                    self.train_NN_central_difference(x_data, y_data, dx_data_NN, epochs)
+                    dx_data_NN_predict = self.NN_predict_central_difference(x_data, y_data)
+                    dx_data_linear = dx_data - dx_data_NN_predict
+                    self.linear_regression((x_lace_data + y_lace_data)/2, dx_data_linear)
+                    err = tf.norm(dx_data_linear - self.mu * (x_lace_data + y_lace_data)/2, ord=np.inf).numpy()
+                    err_history.append(err)
+
+        return err_history
         
         
 
