@@ -6,6 +6,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 import time
+from sklearn.preprocessing import MinMaxScaler
 tf.keras.backend.set_floatx('float64')
 
 class KoopmanDL_DicNN(Layer):

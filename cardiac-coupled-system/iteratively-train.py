@@ -18,8 +18,8 @@ if gpus:
     print(e)
 
 # Load data
-s = np.load('./data/s_sample_0416.npy')
-v = np.load('./data/v_sample_0416.npy')
+s = np.load('./data/s_sample.npy')
+v = np.load('./data/v_sample.npy')
 
 # Build the input tensor
 DataModel = Cardiac_Electrophysiology_DataModel()
@@ -116,7 +116,6 @@ for i in range(iters):
 y_direct_koopman = model.Predict(x_data_scaler, u_data_scaler)
 y_direct_koopman = model.inverse_transform_y(y_direct_koopman)
 
-# np.save('./output/one_step_koopman_output.npy',y_direct_koopman)
 
 err = 1e-6
 mu_last_pred = 1e8 * np.ones(np.shape(w))
@@ -178,7 +177,6 @@ np.save('./output/u_min.npy', model.u_min)
 model.model_KoopmanDL.save_weights('./hybrid_checkpoints/ckpt')
 
 
-# np.save('./output/err_history_v_original_0415.npy',err_v)
 
 print("The training of Hybrid Method is down.")
     
