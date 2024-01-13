@@ -5,6 +5,7 @@ import tensorflow as tf
 import gc
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
+from scipy.optimize import fsolve
 
 class Toymodel(object):
     def __init__(self, dim = 20, L0 = 0, L1 = 1, mu = 1):
@@ -532,7 +533,7 @@ class LinearModelCombiningNN(object):
         x_train, x_test, y_train, y_test = train_test_split(x_data, y_data_scaled, test_size=0.2, random_state=42)
 
         self.NN.compile(optimizer=optimizer, loss=loss_fn)
-        self.NN.fit(x_train, y_train, epochs=epochs, validation_data = [x_test, y_test], verbose = 2)
+        self.NN.fit(x_train, y_train, epochs=epochs, validation_data = [x_test, y_test], batch_size = 4096, verbose = 2)
 
     def train_NN_central_difference(self, x1_data, x2_data, y_data, epochs=100, learning_rate=0.0001):
         loss_fn = tf.keras.losses.MeanSquaredError()
@@ -736,7 +737,67 @@ class LinearModelCombiningNN(object):
 
         return err_history
         
+    def euler_backward_equation(self, u_next, u_n):
+        equations = np.zeros_like(u_next)
+        for j in range(1, len(u_n) - 1):
+            equations[j] = u_next[j] - u_n[j] - self.mu * (u_next[j-1] - 2*u_next[j] + u_next[j+1]) - self.NN_predict(u_next[j].reshape((-1,1))).flatten()
+    
+        equations[0] = u_next[0] - u_n[0] - self.mu * (- 2*u_next[0] + u_next[1]) - self.NN_predict(u_next[0].reshape((-1,1))).flatten()
+        equations[-1] = u_next[-1] - u_n[-1] - self.mu * (u_next[-2] - 2*u_next[-1]) - self.NN_predict(u_next[-1].reshape((-1,1))).flatten()
+    
+        return equations
+    
+    def central_difference_equation(self, u_next, u_n):
+        equations = np.zeros_like(u_next)
+        for j in range(1, len(u_n) - 1):
+            equations[j] = u_next[j] - u_n[j] - self.mu * 1/2 * ((u_next[j-1] - 2*u_next[j] + u_next[j+1]) + u_n[j-1] - 2*u_n[j] + u_n[j+1]) - self.NN_predict_central_difference(u_n[j].reshape((-1,1)), u_next[j].reshape((-1,1))).flatten()
+
+        equations[0] = u_next[0] - u_n[0] - self.mu * 1/2 * ((- 2*u_next[0] + u_next[1]) - 2*u_n[0] + u_n[1]) - self.NN_predict_central_difference(u_n[j].reshape((-1,1)), u_next[j].reshape((-1,1))).flatten()
+        equations[-1] = u_next[-1] - u_n[-1] - self.mu * 1/2 * ((u_next[-2] - 2*u_next[-1]) + u_n[-2] - 2*u_n[-1]) - self.NN_predict_central_difference(u_n[j].reshape((-1,1)), u_next[j].reshape((-1,1))).flatten()
+        return equations
+    
+    def compute_laplace(self, u):
+        dim = len(u)
+        self.A = np.zeros([dim, dim])
+        for i in range(dim - 1):
+            self.A[i, i] = -2 
+        for i in range(dim - 2):
+            self.A[i, i + 1] = 1
+            self.A[i + 1, i] = 1
+        u_laplace = u @ self.A
+        return u_laplace
         
+    
+    def euler_forward_prediction(self, u_0, steps):
+        u_traj = [u_0]
+        for step in range(steps):
+            u_next = u_0 + self.mu * self.compute_laplace(u_0) + self.NN_predict(u_0.reshape((-1,1))).flatten()
+            u_traj.append(u_next)
+            u_0 = u_next
+        return u_traj
+    
+    def euler_backward_prediction(self, u_0, steps):
+        u_traj = [u_0]
+        for step in range(steps):
+            u_next_guess = u_0.copy()
+            u_next = fsolve(self.euler_backward_equation, u_next_guess, args=(u_0))
+            u_traj.append(u_next)
+            u_0 = u_next
+            print(step)
+        return u_traj
+    
+    def central_difference_prediction(self, u_0, steps):
+        u_traj = [u_0]
+        for step in range(steps):
+            u_next_guess = u_0.copy()
+            u_next = fsolve(self.central_difference_equation, u_next_guess, args=(u_0))
+            u_traj.append(u_next)
+            u_0 = u_next
+            print(step)
+        return u_traj
+    
+
+
 
 
 
