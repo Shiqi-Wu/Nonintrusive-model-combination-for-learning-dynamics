@@ -2,6 +2,8 @@
 
 This repository contains the code and related materials for the experiments conducted in preparation for my manuscript: "Non-intrusive model combination for learning dynamics". The code and data provided here are intended to support and reproduce the results presented in the manuscript. This README file provides an overview of the repository's structure and how to use the code and data.
 
+This manuscript is accessible at https://arxiv.org/abs/2311.02967.
+
 ## Table of Contents
 
 - [Introduction](#introduction)
